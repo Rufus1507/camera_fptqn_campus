@@ -1,0 +1,13 @@
+# Bỏ qua các file model nặng
+*.engine
+*.onnx
+*.pt
+*.onnx
+
+# Bỏ qua file database
+*.db
+
+# Bỏ qua các thư mục môi trường ảo (nếu có)
+venv/
+__pycache__/
+.ipynb_checkpoints/
