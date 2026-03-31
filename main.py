@@ -93,28 +93,31 @@ def load_cameras():
 # GPU / MODEL
 # =============================================================================
 DEVICE     = 0
-MODEL_PATH = "yolov8n.engine"
+MODEL_PATH = "yolov8s.engine"
 torch.backends.cudnn.benchmark = True
 
 # =============================================================================
 # CONFIG
 # =============================================================================
-# DETECT_FPS = 5: gửi 5 frame/s từ mỗi cam vào queue
-# QUEUE_PER_CAM = 6: buffer đủ lớn để tránh drop khi YOLO thread bận
+# DETECT_FPS: fps gửi frame từ mỗi cam vào queue
+#   - 6 cam  → dùng 5 fps/cam  (tổng 30 fps, YOLO ~20fps → OK với batch)
+#   - 20 cam → dùng 2 fps/cam  (tổng 40 fps, YOLO ~20fps → cần batch=2+)
+#   Công thức: DETECT_FPS ≤ YOLO_FPS / NUM_CAMS
+#
 # BATCH_SIZE = 1: TRT engine hiện tại là static batch=1
-#   (tăng lên 4/8 khi re-export engine với dynamic batch)
-DETECT_FPS    = 5           # fps gửi frame vào queue mỗi cam
-RESIZE        = (416, 416)  # phải khớp imgsz lúc export TRT engine
+#   → Re-export với dynamic batch=8 để tăng throughput lên 4–8×
+DETECT_FPS    = 5      # fps gửi frame vào queue mỗi cam (giảm cho 20 cam)
+RESIZE        = (640, 640)  # phải khớp imgsz lúc export TRT engine
 BATCH_SIZE    = 1           # TRT engine export với batch=1 static shape
-QUEUE_PER_CAM = 6           # buffer tăng lên 6 để tránh queue empty
+QUEUE_PER_CAM = 4           # buffer nhỏ hơn vì DETECT_FPS giảm
 CONF_THRESH   = 0.25        # ngưỡng confidence
 PERSON_CLASS  = 0           # COCO class index "person"
 
 # Rolling window để đo FPS chính xác
-FPS_WINDOW    = 3.0         # giây
+FPS_WINDOW    = 5.0         # giây (tăng lên vì FPS thấp hơn)
 
 # People count persistence
-PEOPLE_HISTORY = 3
+PEOPLE_HISTORY = 5          # tăng lên bù đắp FPS thấp hơn
 
 RTSP_RETRY_DELAY = 10       # giây
 
@@ -310,8 +313,8 @@ def rtsp_worker(cam: dict, stop_event: threading.Event):
                 q.put_nowait(frame_resized)
                 # Debug: log khi queue fill cao bất thường
                 if qsize_before >= QUEUE_PER_CAM - 1:
-                    print(f"[Q] Cam {cam_id}: queue={qsize_before}/{QUEUE_PER_CAM} (FULL → dropped old)")
-
+                    # print(f"[Q] Cam {cam_id}: queue={qsize_before}/{QUEUE_PER_CAM} (FULL → dropped old)")
+                    continue
         cap.release()
 
     print(f"🔴 Cam {cam_id}: thread dừng")
@@ -334,8 +337,8 @@ def _yolo_thread_logic():
         local_model = YOLO(MODEL_PATH, task="detect")
         try:
             local_model.predict(
-                torch.zeros(1, 3, 416, 416, device=DEVICE),
-                imgsz=416, verbose=False
+                torch.zeros(1, 3, RESIZE[1], RESIZE[0], device=DEVICE),
+                imgsz=RESIZE[0], verbose=False
             )
             print("[YOLO] Warmup complete.")
         except Exception as e:
@@ -364,8 +367,12 @@ def _yolo_thread_logic():
             time.sleep(0.0005)   # idle ngắn → phản ứng nhanh khi có frame
             continue
 
-        # Ưu tiên cam có nhiều frame nhất (giảm latency)
-        cams_with_frames.sort(key=lambda x: x[1], reverse=True)
+        # Ưu tiên cam bị "bỏ đói" lâu nhất (phân bổ FPS đều nhau)
+        # Nếu chưa từng xử lý, get() trả về 0.0 → được ưu tiên cao nhất.
+        # Ở cùng một thời điểm chờ, ưu tiên cam có queue dài hơn (-x[1]).
+        with state_lock:
+            ldt = dict(last_detect_time)
+        cams_with_frames.sort(key=lambda x: (ldt.get(x[0], 0.0), -x[1]))
 
         # ── Thu thập batch ────────────────────────────────────────────────────
         batch_frames  = []
@@ -393,7 +400,7 @@ def _yolo_thread_logic():
             results = local_model.predict(
                 source=batch_frames,
                 device=DEVICE,
-                imgsz=416,
+                imgsz=RESIZE[0],
                 conf=CONF_THRESH,
                 verbose=False,
                 stream=False,
@@ -464,7 +471,7 @@ def log_writer_worker():
             }
             last_det_snap = {cid: last_detect_time.get(cid) for cid in cur_ids}
 
-        lines = ["timestamp,cam_number,person_ids,is_night\n"]
+        lines = ["timestamp,cam_number,FPS,person_ids,is_night\n"]
         for cid in sorted(cur_ids):
             s    = snapshot.get(cid)
             last = last_det_snap.get(cid)
@@ -472,9 +479,10 @@ def log_writer_worker():
                 continue
             stale      = (last is None) or (now - last > STALE_TIMEOUT)
             cam_num    = cam_number_map.get(cid, cid)
+            fps_val    = fps_snap.get(cid, 0.0)
             ids_str    = "|".join(s.get("person_ids", [])) if not stale else ""
             lines.append(
-                f"{s['timestamp']},{cam_num},{ids_str},{s['is_night']}\n"
+                f"{s['timestamp']},{cam_num},{fps_val},{ids_str},{s['is_night']}\n"
             )
 
         try:
@@ -520,9 +528,9 @@ async def _async_mqtt_sender():
                         continue
                     topic   = snap_topics.get(cid, MQTT_TOPIC)
                     s       = snap_state[cid]
-                    cam_num = cam_number_map.get(cid, cid)
+                    
                     payload = {
-                        "cam_number":  cam_num,
+                        
                         "person_ids":  s.get("person_ids", []),
                         "light_level": int(s["is_night"]),
                     }
