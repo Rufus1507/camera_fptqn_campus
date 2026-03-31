@@ -18,7 +18,14 @@ TOPIC_RELOAD_INTERVAL = 10   # giây reload topic mới từ DB
 PEOPLE_THRESHOLD = 5
 LIGHT_MIN        = 1
 
-LIGHT_LABEL = {0: "dark", 1: "dim", 2: "medium", 3: "bright"}
+# Ánh xạ light_level (1-4) → nhãn đọc được (khớp với get_brightness trong main.py)
+LIGHT_LABEL = {
+    "0": "unknown",
+    "1": "dark/IR",
+    "2": "dim",
+    "3": "medium",
+    "4": "bright",
+}
 
 # ================= ĐỌC TOPICS TỪ DB =================
 def load_camera_topics() -> list[str]:
@@ -38,23 +45,34 @@ async def handle_message(client, topic: str, payload_str: str):
     try:
         data        = json.loads(payload_str)
         now         = datetime.now().strftime("%H:%M:%S")
-        people      = int(data.get("people", 0))
-        light_level = int(data.get("light_level", 2))
 
+        # Payload mới: person_ids (list), light_level (int), cam_number (int)
+        person_ids  = data.get("person_ids", [])
+        people      = len(person_ids)
+        light_level = str(data.get("light_level", 0))
+        cam_number  = data.get("cam_number", "?")
+
+        ids_str = ", ".join(person_ids) if person_ids else "—"
         print(
-            f"[{now}] ✅ Nhận | topic={topic} | "
-            f"people={people} | light={LIGHT_LABEL.get(light_level, str(light_level))}"
+            f"[{now}] ✅ Nhận | cam={cam_number} | topic={topic} | "
+            f"người={people} {ids_str} | ánh_sáng={LIGHT_LABEL.get(light_level, light_level)}"
         )
 
-        if people > 0 and light_level <= LIGHT_MIN:
-            alert = json.dumps({"topic": topic, "action": "TURN_ON", "people": people, "time": now}).encode()
+        if people > 0 and int(light_level) <= LIGHT_MIN:
+            alert = json.dumps({
+                "topic": topic, "action": "TURN_ON",
+                "person_ids": person_ids, "time": now
+            }).encode()
             await client.publish("alert/lighting", alert, qos=1)
             print(f"  💡 Bật đèn — {topic}")
 
         if people >= PEOPLE_THRESHOLD:
-            alert = json.dumps({"topic": topic, "action": "CROWD_ALERT", "people": people, "time": now}).encode()
+            alert = json.dumps({
+                "topic": topic, "action": "CROWD_ALERT",
+                "person_ids": person_ids, "time": now
+            }).encode()
             await client.publish("alert/crowd", alert, qos=1)
-            print(f"  🚨 Đông người tại {topic} ({people} người)")
+            print(f"  🚨 Đông người tại {topic} ({people} người: {ids_str})")
 
     except Exception as e:
         print(f"❌ Lỗi xử lý [{topic}]: {e}")

@@ -144,8 +144,12 @@ TOTAL_VIDEO  = len(CAM_IDS)
 
 init_time    = int(time.time())
 cam_topic_map: dict[int, str] = {c["id"]: c["mqtt_topic"] for c in CAMERAS}
+
+# Ánh xạ cam_id (DB) → số cam tuần tự (1, 2, 3...)
+cam_number_map: dict[int, int] = {cid: idx + 1 for idx, cid in enumerate(sorted(CAM_IDS))}
+
 camera_state = {
-    cid: {"timestamp": init_time, "fps": 0.0, "people": 0, "is_night": "0"}
+    cid: {"timestamp": init_time, "fps": 0.0, "person_ids": [], "is_night": "0"}
     for cid in CAM_IDS
 }
 frame_queues = {cid: Queue(maxsize=QUEUE_PER_CAM) for cid in CAM_IDS}
@@ -166,7 +170,7 @@ STALE_TIMEOUT = 5.0
 # INIT LOG FILE
 # =============================================================================
 with open(LOG_FILE, "w") as f:
-    f.write("timestamp,cam_id,fps,people,is_night\n")
+    f.write("timestamp,cam_number,person_ids,is_night\n")
 
 # =============================================================================
 # DAY / NIGHT
@@ -419,17 +423,20 @@ def _yolo_thread_logic():
                     cid, deque([0] * PEOPLE_HISTORY, maxlen=PEOPLE_HISTORY)
                 )
                 hist.append(raw_person)
-                stable_person = max(hist)
+                stable_count = max(hist)
+
+                # Tạo danh sách person_id: P_1, P_2, ... P_n
+                person_ids = [f"P_{k}" for k in range(1, stable_count + 1)]
 
                 last_detect_time[cid] = now
                 brightness = get_brightness(batch_frames[i])
 
                 if cid in camera_state:
                     camera_state[cid] = {
-                        "timestamp": int(now),
-                        "fps":       fps_val,
-                        "people":    stable_person,
-                        "is_night":  brightness,
+                        "timestamp":  int(now),
+                        "fps":        fps_val,
+                        "person_ids": person_ids,
+                        "is_night":   brightness,
                     }
 
 def yolo_worker():
@@ -457,16 +464,17 @@ def log_writer_worker():
             }
             last_det_snap = {cid: last_detect_time.get(cid) for cid in cur_ids}
 
-        lines = ["timestamp,cam_id,fps,people,is_night\n"]
+        lines = ["timestamp,cam_number,person_ids,is_night\n"]
         for cid in sorted(cur_ids):
             s    = snapshot.get(cid)
             last = last_det_snap.get(cid)
             if not s:
                 continue
-            stale   = (last is None) or (now - last > STALE_TIMEOUT)
-            fps_out = 0.0 if stale else fps_snap.get(cid, 0.0)
+            stale      = (last is None) or (now - last > STALE_TIMEOUT)
+            cam_num    = cam_number_map.get(cid, cid)
+            ids_str    = "|".join(s.get("person_ids", [])) if not stale else ""
             lines.append(
-                f"{s['timestamp']},{cid},{fps_out},{s['people']},{s['is_night']}\n"
+                f"{s['timestamp']},{cam_num},{ids_str},{s['is_night']}\n"
             )
 
         try:
@@ -510,10 +518,12 @@ async def _async_mqtt_sender():
                 for cid in cur_ids:
                     if cid not in snap_state:
                         continue
-                    topic = snap_topics.get(cid, MQTT_TOPIC)
-                    s = snap_state[cid]
+                    topic   = snap_topics.get(cid, MQTT_TOPIC)
+                    s       = snap_state[cid]
+                    cam_num = cam_number_map.get(cid, cid)
                     payload = {
-                        "people":      s["people"],
+                        "cam_number":  cam_num,
+                        "person_ids":  s.get("person_ids", []),
                         "light_level": int(s["is_night"]),
                     }
                     await client.publish(topic, json.dumps(payload).encode(), qos=0x01)
@@ -574,7 +584,7 @@ def db_watcher_worker():
                 people_history[cid]    = deque([0] * PEOPLE_HISTORY, maxlen=PEOPLE_HISTORY)
                 camera_state[cid]      = {
                     "timestamp": int(time.time()),
-                    "fps": 0.0, "people": 0, "is_night": "0"
+                    "fps": 0.0, "person_ids": [], "is_night": "0"
                 }
                 cam_topic_map[cid]     = cam.get("mqtt_topic", MQTT_TOPIC)
             stop_evt = threading.Event()
@@ -586,8 +596,13 @@ def db_watcher_worker():
 
         if added or removed:
             with state_lock:
-                CAM_IDS     = sorted(new_ids)
-                TOTAL_VIDEO = len(CAM_IDS)
+                CAM_IDS         = sorted(new_ids)
+                TOTAL_VIDEO     = len(CAM_IDS)
+                # Cập nhật lại cam_number_map khi thêm/xóa cam
+                cam_number_map.clear()
+                cam_number_map.update(
+                    {cid: idx + 1 for idx, cid in enumerate(CAM_IDS)}
+                )
             print(f"📋 DB watcher: tổng {TOTAL_VIDEO} cameras đang chạy")
 
 # =============================================================================
