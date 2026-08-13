@@ -12,7 +12,8 @@ BROKER_PORT = 1883
 BROKER_URL  = f"mqtt://{BROKER_HOST}:{BROKER_PORT}/"
 CLIENT_ID   = "machine_b_receiver"
 
-CAM_DB_PATH           = os.path.join(os.path.dirname(__file__), "cameras.db")
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+CAM_DB_PATH   = os.path.join(_PROJECT_ROOT, "test", "cameras.db")
 TOPIC_RELOAD_INTERVAL = 10   # giây reload topic mới từ DB
 
 PEOPLE_THRESHOLD = 5
@@ -40,39 +41,42 @@ def load_camera_topics() -> list[str]:
         print(f"⚠️  Không đọc được cameras.db: {e}")
         return []
 
+# ================= STATE =================
+latest_people = {}
+last_counts = {"z1": -1, "z2": -1}
+
 # ================= XỬ LÝ MESSAGE =================
 async def handle_message(client, topic: str, payload_str: str):
+    global latest_people, last_counts
     try:
         data        = json.loads(payload_str)
         now         = datetime.now().strftime("%H:%M:%S")
 
-        # Payload mới: person_ids (list), light_level (int), cam_number (int)
+        # Payload mới: person_ids (list)
         person_ids  = data.get("person_ids", [])
-        people      = len(person_ids)
-        light_level = str(data.get("light_level", 0))
-        cam_number  = data.get("cam_number", "?")
 
-        ids_str = ", ".join(person_ids) if person_ids else "—"
-        print(
-            f"[{now}] ✅ Nhận | cam={cam_number} | topic={topic} | "
-            f"người={people} {ids_str} | ánh_sáng={LIGHT_LABEL.get(light_level, light_level)}"
-        )
+        # Cập nhật danh sách người mới nhất của camera này
+        latest_people[topic] = set(person_ids)
+        
+        # Gom nhóm theo khu vực (dùng gộp Set để đếm chính xác Global ID)
+        zone1_topics = {"autolight/f2/corridor/cam", "autolight/f5/corridor/cam"}
+        zone1_set = set()
+        zone2_set = set()
+        
+        for t, p_ids in latest_people.items():
+            if t in zone1_topics:
+                zone1_set.update(p_ids)
+            else:
+                zone2_set.update(p_ids)
+                
+        z1_count = len(zone1_set)
+        z2_count = len(zone2_set)
 
-        if people > 0 and int(light_level) <= LIGHT_MIN:
-            alert = json.dumps({
-                "topic": topic, "action": "TURN_ON",
-                "person_ids": person_ids, "time": now
-            }).encode()
-            await client.publish("alert/lighting", alert, qos=1)
-            print(f"  💡 Bật đèn — {topic}")
-
-        if people >= PEOPLE_THRESHOLD:
-            alert = json.dumps({
-                "topic": topic, "action": "CROWD_ALERT",
-                "person_ids": person_ids, "time": now
-            }).encode()
-            await client.publish("alert/crowd", alert, qos=1)
-            print(f"  🚨 Đông người tại {topic} ({people} người: {ids_str})")
+        # Chỉ in ra dòng tổng hợp nếu như số lượng thay đổi, không in lặp lại mỗi khi nhận message
+        if z1_count != last_counts["z1"] or z2_count != last_counts["z2"]:
+            print(f"[{now}] 📊 Tổng người — Khu vực 1: {z1_count} | Khu vực 2: {z2_count}")
+            last_counts["z1"] = z1_count
+            last_counts["z2"] = z2_count
 
     except Exception as e:
         print(f"❌ Lỗi xử lý [{topic}]: {e}")

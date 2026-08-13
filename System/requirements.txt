@@ -1,0 +1,32 @@
+# ─────────────────────────────────────────────────────────────────────
+# IMPORTANT (Jetson Orin Nano / JetPack): install torch and torchvision
+# from NVIDIA's JetPack wheel index BEFORE running
+# `pip install -r requirements.txt` — do NOT let plain PyPI provide them.
+# A generic PyPI torch on aarch64 is either CPU-only or fails to install,
+# which would silently force inference onto the CPU and use far more RAM.
+# Versions verified working on this board:
+#   torch==2.5.0a0+872d972e41.nv24.8, torchvision==0.20.0a0+afc54f7
+# See: https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/
+# Also requires libcusparseLt preloaded before `import torch` — see
+# utils/gst_utils.py:preload_libraries().
+# ─────────────────────────────────────────────────────────────────────
+
+# Core Machine Learning (torch/torchvision from the JetPack wheel index,
+# see note above — everything else here comes from normal PyPI)
+torch
+torchvision
+ultralytics
+torchreid
+
+# Computer Vision & Image Processing
+opencv-python
+numpy
+scipy
+
+# Networking & Communication
+amqtt
+requests
+urllib3
+
+# Web / Display
+waitress

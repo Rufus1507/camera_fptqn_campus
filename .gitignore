@@ -1,14 +1,44 @@
-# Bỏ qua các file model nặng
+# ===== Model files (nặng, không push lên git) =====
+# Chỉ ignore các file model không phải custom
 *.engine
+*.engine.bak*
 *.onnx
 *.pt
-*.onnx
 
-# Bỏ qua file database
+# Ngoại lệ: giữ lại các file custom
+!*custom*.engine
+!*custom*.onnx
+!*custom*.pt
+
+# ===== Database files =====
 *.db
+*.db-shm
+*.db-wal
 
-# Bỏ qua các thư mục môi trường ảo (nếu có)
-venv/
+# ===== Python cache =====
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
 .ipynb_checkpoints/
+
+# ===== Virtual environments =====
+venv/
+.venv/
+.env/
+env/
+
+# ===== Video & media folders =====
+saved_videos/
+recorded_1fps/
+video_da_cat/
 MediaMTX/
+
+# ===== Logs & output files =====
+nohup.out
+*.log
+
+# ===== CSV & misc =====
+*.csv
+path_video.txt
+test_cameras.db
